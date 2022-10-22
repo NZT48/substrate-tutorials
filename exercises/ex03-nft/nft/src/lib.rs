@@ -94,11 +94,55 @@ pub mod pallet {
 			metadata: BoundedVec<u8, T::MaxLength>,
 			supply: u128,
 		) -> DispatchResult {
+			let origin = ensure_signed(origin)?;
+			ensure!(supply > 0,Error::<T>::NoSupply);
+
+			let asset_id = Self::nonce();
+			Nonce::<T>::set(asset_id.saturating_add(1));
+
+			let asset_details = UniqueAssetDetails::new(origin.clone(), metadata, supply);
+
+			UniqueAsset::<T>::insert(asset_id, asset_details);
+			Account::<T>::insert(asset_id, origin.clone(), supply);
+
+			Self::deposit_event(Event::<T>::Created{
+				creator: origin,
+				asset_id: asset_id
+			});
+
 			Ok(())
 		}
 
 		#[pallet::weight(0)]
 		pub fn burn(origin: OriginFor<T>, asset_id: UniqueAssetId, amount: u128) -> DispatchResult {
+			let origin = ensure_signed(origin)?;
+			ensure!(Self::unique_asset(asset_id).is_some(), Error::<T>::UnknownAssetId);
+			ensure!(Account::<T>::get(asset_id, origin.clone()) > 0, Error::<T>::NotOwned);
+			
+			let mut total_supply = 0;
+
+			UniqueAsset::<T>::try_mutate(asset_id, |maybe_details| -> DispatchResult {
+				let details = maybe_details.as_mut().ok_or(Error::<T>::UnknownAssetId)?;
+				let mut burned_amount = 0;
+				
+				Account::<T>::mutate(asset_id, origin.clone(), |balance| {
+					let old_balance = *balance;
+					*balance = balance.saturating_sub(amount);
+					burned_amount = old_balance - *balance;
+				});
+
+				details.supply = details.supply.saturating_sub(burned_amount);
+				total_supply = details.supply;
+
+				Ok(())
+			})?;
+
+			Self::deposit_event(Event::<T>::Burned{
+				asset_id: asset_id,
+				owner: origin,
+				total_supply: total_supply,
+			});
+
 			Ok(())
 		}
 
@@ -109,6 +153,29 @@ pub mod pallet {
 			amount: u128,
 			to: T::AccountId,
 		) -> DispatchResult {
+			let origin = ensure_signed(origin)?;
+			ensure!(Self::unique_asset(asset_id).is_some(), Error::<T>::UnknownAssetId);
+			ensure!(Account::<T>::get(asset_id, origin.clone()) > 0, Error::<T>::NotOwned);
+
+			Account::<T>::mutate(asset_id, origin.clone(), |balance| {
+				let old_balance = *balance;
+				*balance = balance.saturating_sub(amount);
+				let transfered = old_balance - *balance;
+
+				Account::<T>::mutate(asset_id, to.clone(), |balance| {
+					*balance = balance.saturating_add(transfered);
+				});
+
+			});
+			
+			// - Emit a `Transferred` event.
+			Self::deposit_event(Event::<T>::Transferred{
+				asset_id: asset_id,
+				from: origin,
+				to: to,
+				amount: amount
+			});
+
 			Ok(())
 		}
 	}
